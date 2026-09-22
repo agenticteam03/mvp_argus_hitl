@@ -1,0 +1,15 @@
+# what: how git must normalise line endings.
+# why:  this repository is written on Windows and run on Ubuntu. Windows editors
+#       write CRLF; Linux tools expect LF. A YAML file survives CRLF, but a
+#       shell script does not -- `#!/bin/sh\r` makes the kernel look for an
+#       interpreter whose name ends in a carriage return, and the error it
+#       prints ("no such file or directory") names a file that plainly exists.
+#       That bug costs an afternoon the first time you meet it.
+# how:  text=auto eol=lf stores everything as LF in git and checks it out as LF
+#       everywhere. The binary lines stop git rewriting bytes it does not own.
+
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.db  binary

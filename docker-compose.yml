@@ -1,0 +1,182 @@
+# what: the whole lab as four containers -- the victim, our exporter, Prometheus,
+#       and the agent itself.
+# why:  on the laptop the exporter and the agent were bare Python processes and
+#       only the victim and Prometheus were containers. That split does not
+#       travel: the target VM is shared, already runs a Prometheus of its own,
+#       and should not grow a virtualenv. So everything becomes a container, and
+#       the file below is the entire deployment.
+# how:  `docker compose up -d` starts the three long-running services;
+#       `docker compose run --rm agent python -m agent.run` performs ONE
+#       investigation and exits. The agent is a job, not a daemon -- it has no
+#       loop of its own, which is exactly why the step bound in the graph router
+#       is what bounds a run.
+#
+#       STAGE 5 CHANGES WHAT "EXITS" MEANS. When the model asks for a write, the
+#       graph calls interrupt(): it saves the run to the checkpoint file and the
+#       process ends. The approval arrives later, as a SECOND container:
+#
+#           docker compose run --rm agent python -m agent.run            # pauses
+#           docker compose run --rm agent python -m agent.run --approve  # resumes
+#
+#       Those are two different containers, minutes or days apart. The only
+#       thing connecting them is the state on the agent-data volume. Get that
+#       volume wrong and the pause vanishes on exit -- and the symptom is not a
+#       missing file, it is the cheerful message "Nothing is waiting for an
+#       answer". That is why LAB_AGENT_CHECKPOINTS is set below and not left to
+#       its laptop default.
+#
+#       READ THIS BEFORE DEPLOYING ON A SHARED MACHINE. Two containers here
+#       mount /var/run/docker.sock. That socket is root-equivalent on the host:
+#       anything that can reach it can start a privileged container. From the
+#       moment it is mounted, the allowlist in agent/tools/registry.py and the
+#       human gate in graph.py are what stand between a model's suggestion and
+#       the whole machine. That is a deliberate choice, and it is the reason
+#       both are enforced in Python rather than requested in a prompt. Adding
+#       `:ro` would be theatre -- the Docker API is HTTP over that socket, and a
+#       read-only FILE does not make POST /containers/x/restart fail.
+
+# An explicit project name. Without it compose derives one from the folder, so
+# the same stack cloned into a differently-named directory would get different
+# network and volume names -- and on a shared VM, two people's "prometheus"
+# would fight. Everything below is namespaced under this.
+name: labmvp
+
+services:
+  # ---------------------------------------------------------------------------
+  # The incident. Everything else exists to notice this container.
+  # ---------------------------------------------------------------------------
+  lab-victim:
+    image: python:3.12-alpine   # multi-arch: an arm64 manifest exists, so this runs on the VM
+    container_name: lab-victim  # fixed name: the allowlist in registry.py matches lab-*
+    mem_limit: 128m             # MANDATORY - see below
+    restart: unless-stopped     # what turns one OOM kill into a restart LOOP
+    # mem_limit is not a tuning knob, it is the blast radius. Without it the
+    # kill is not contained: the kernel picks the largest process on the host,
+    # which on this VM could be the team's Prometheus or dockerd itself. With
+    # it, the kill happens inside this container's own cgroup and nothing else
+    # on the machine notices. RB-002 says the same thing at more length.
+    #
+    # The VM has NO SWAP, which makes this cleaner than on a laptop: there is
+    # nowhere to page out to, so the limit is hit exactly when the arithmetic
+    # says it will be, about 13 seconds in.
+    command:
+      - python
+      - -u                      # unbuffered, so anything printed appears immediately
+      - -c
+      - |
+        import time
+        buf = []
+        while True:
+            buf.append(bytearray(10 * 1024 * 1024))
+            time.sleep(1)
+
+  # ---------------------------------------------------------------------------
+  # The observation path: our exporter, then Prometheus scraping it.
+  # ---------------------------------------------------------------------------
+  exporter:
+    build: .
+    image: lab-agent:latest     # built once, used by both this service and `agent`
+    container_name: mvp-exporter
+    command: ["python", "-m", "agent.exporter"]
+    restart: unless-stopped
+    volumes:
+      # How the exporter reads container state at all. See the warning at the
+      # top of this file.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      # 127.0.0.1 ON PURPOSE. Prometheus reaches this over the compose network
+      # and needs no published port at all; this mapping exists so a human on
+      # the VM can curl it. Binding 0.0.0.0 would expose the lab to anything
+      # that can route to the VM, and the VM inventory already flags that the
+      # existing monitoring listens too broadly.
+      - "127.0.0.1:9101:9101"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0  # pinned: "latest" turns a working demo into a surprise
+    # NOT named lab-anything, on purpose. The agent's allowlist permits writes
+    # on lab-* containers, so any container with that prefix is inside its blast
+    # radius. The monitoring must not be: an agent that can restart its own
+    # metrics source can blind itself.
+    #
+    # And not plain `prometheus` either -- the target VM already runs a
+    # container by that name, and Docker container names are unique per host.
+    # The mvp- prefix keeps this stack from colliding with the team's existing
+    # one, and is far enough from "lab-" that the allowlist still refuses it.
+    container_name: mvp-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    ports:
+      # 9091, not 9090: the VM's own Prometheus already holds 9090. Inside the
+      # container it is still 9090, which is why PROMETHEUS_URL below says 9090
+      # -- the left half of this mapping is the host's business, and nothing on
+      # the compose network ever sees it.
+      - "127.0.0.1:9091:9090"
+    volumes:
+      # :ro - Prometheus only ever reads this file, so it is mounted read-only.
+      # (Here :ro means what it says, unlike on a socket.)
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      # Only needed if you move the exporter back out to the host, as on the
+      # Windows laptop. Docker Desktop provides this name automatically; on a
+      # plain Linux host this line is what creates it. Harmless otherwise.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - exporter   # so the scrape target's DNS name exists when Prometheus starts
+    # No volume for the TSDB, deliberately. The agent only ever runs INSTANT
+    # queries -- "what is true now" -- so history across a restart buys nothing
+    # here and would quietly grow on a shared 45 GB disk.
+
+  # ---------------------------------------------------------------------------
+  # The agent. A job, not a daemon: it runs once and exits -- or pauses at the
+  # gate and exits, which is the same thing with its state left behind.
+  # ---------------------------------------------------------------------------
+  agent:
+    build: .
+    image: lab-agent:latest
+    # NO container_name here, on purpose. `docker compose run` generates its own
+    # name for each invocation; a fixed one collides the moment a second run
+    # starts, and Stage 5 is built around running this twice -- once to pause,
+    # once to approve.
+    #
+    # A profile keeps it out of `docker compose up -d`. Starting the agent is
+    # always a deliberate act: it may call a model, and it may restart a
+    # container. `docker compose run` activates the profile for that one
+    # invocation.
+    profiles: ["agent"]
+    env_file:
+      # required:false so `up -d` still works before anyone has written a .env.
+      # The agent needs it; the three services above do not.
+      - path: .env
+        required: false
+    environment:
+      # Service name and INTERNAL port. `localhost` inside this container means
+      # this container, which is the single most common way a containerised
+      # agent fails to find its own monitoring.
+      PROMETHEUS_URL: http://prometheus:9090
+      # The three files that must outlive the container, all on the volume
+      # below. Set HERE rather than in .env because they describe the shape of
+      # this deployment, not a preference -- and because getting one wrong
+      # produces a silent WRONG ANSWER rather than an error:
+      #   episodic memory -> every run reports "0 prior incidents"
+      #   audit trail     -> the record of what the agent did dies with it
+      #   checkpoints     -> the paused run vanishes before anyone can approve it
+      LAB_AGENT_DB: /data/lab_agent.db
+      LAB_AGENT_AUDIT: /data/audit.jsonl
+      LAB_AGENT_CHECKPOINTS: /data/lab_checkpoints.db
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock   # so its tools can read and restart lab-*
+      - agent-data:/data                            # memory, audit trail and paused runs
+    extra_hosts:
+      # The route to a model running on the VM HOST rather than in this stack --
+      # an Ollama on :11434, say. Without this line there is no name inside the
+      # container for "the machine I am running on", and LLM_BASE_URL has to
+      # carry a hard-coded IP that changes with the network.
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - prometheus
+
+volumes:
+  # One volume for all three pieces of agent state. They belong together: an
+  # audit trail without the memory it refers to, or a checkpoint without the
+  # trail that says what it was about to do, is half a record.
+  agent-data:

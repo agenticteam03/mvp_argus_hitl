@@ -1,0 +1,30 @@
+# what: what the build context must NOT carry into the image.
+# why:  two reasons, and the second one is the serious one. A slimmer context
+#       builds faster -- but more importantly, `.env` holds credentials, and a
+#       file copied into an image is in that image forever, readable by anyone
+#       who can pull it. Secrets reach a container through the ENVIRONMENT at
+#       run time, never through a COPY.
+# how:  the Dockerfile copies only requirements.txt, agent/ and runbooks/, so
+#       most of this is belt and braces. It is written out anyway because the
+#       next person to add a COPY line will not re-derive the reasoning.
+
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.db
+.git/
+.gitignore
+.pytest_cache/
+audit.jsonl
+code.bash
+output.bash
+CLAUDE.md
+mvp_plan.md
+*.md
+!runbooks/*.md
+
+# Stage 5 run state: the audit trail and the demo trails.
+audit.jsonl
+demo_*.jsonl

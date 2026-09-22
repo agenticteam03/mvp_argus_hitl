@@ -1,0 +1,27 @@
+# what: the scrape configuration -- who Prometheus asks, and how often.
+# why:  Prometheus PULLS. Nothing is ever pushed to it; it fetches /metrics on a
+#       timer and stores each sample with a timestamp. This file is the entire
+#       list of things it knows about, which is why "it is not in Prometheus"
+#       almost always means "nobody told it to scrape that".
+# how:  one job, one target: our own exporter, which in this deployment is a
+#       CONTAINER in the same compose project. Compose gives every service a DNS
+#       name equal to its service name, so `exporter:9101` resolves on the
+#       project network without anyone knowing an IP address.
+
+global:
+  # Matches the exporter's 5 s publish loop. Scraping faster would just store
+  # the same number again; scraping slower would age the agent's evidence, and
+  # the Prometheus adapter refuses samples older than 30 s.
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: lab-exporter
+    static_configs:
+      # `exporter` is the compose SERVICE name, not the container name. Compose
+      # resolves it on the project's own network.
+      #
+      # If you instead run the exporter as a bare process on the host (the
+      # Windows workflow), change this to host.docker.internal:9101 and keep the
+      # extra_hosts line in docker-compose.yml, which is what creates that name
+      # on a plain Linux host.
+      - targets: ["exporter:9101"]

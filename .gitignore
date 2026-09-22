@@ -1,0 +1,36 @@
+# what: what git must never carry.
+# why:  the first line is the one that matters. .env holds the model credentials,
+#       and a key that reaches a repository is a key you must ROTATE, not one you
+#       can delete -- git keeps history. .env.example is committed in its place so
+#       a teammate gets the SHAPE of the configuration and none of the secrets.
+#
+#       The rest is run state, and Stage 5 added three more pieces of it: the
+#       audit trail, the checkpoint file, and the demo trails. None is code.
+#       Committing lab_checkpoints.db would also mean shipping a PAUSED RUN to
+#       whoever clones the repo -- a gate waiting on an answer about a container
+#       on somebody else's laptop.
+# how:  verify before the first push with `git ls-files --cached`. A file that is
+#       already tracked stays tracked even after being listed here -- .gitignore
+#       only affects files git is not yet following.
+
+# --- secrets ---------------------------------------------------------------
+.env
+.env.local
+
+# --- machine output --------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- run state, not code (Stage 4 memory, Stage 5 audit and checkpoints) ---
+*.db
+audit.jsonl
+demo_*.jsonl
+
+# --- the taught session's working files, kept out of the repo on purpose ---
+output.bash
+code.bash
+CLAUDE.md
+mvp_plan.md

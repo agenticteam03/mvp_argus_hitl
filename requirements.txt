@@ -1,0 +1,19 @@
+# what: every Python dependency the agent needs, through Stage 5.
+# why:  one line was added per stage, so the cost of each new technology stays
+#       visible in the git diff instead of arriving as one unexplained wall of
+#       packages on day one. Read it top to bottom and you read the project.
+# how:  installed into a virtualenv with `pip install -r requirements.txt`, or
+#       baked into the image by the Dockerfile. No version is pinned exactly --
+#       >= keeps a teaching repo installable a year from now -- though a real
+#       deployment should pin from `pip freeze` once it works.
+
+
+langgraph>=0.2          # the agent framework: nodes, edges, the router, the loop
+pydantic>=2.0           # validates the LLM's JSON at the model boundary
+pytest>=8.0             # the test runner; must stay offline and free forever
+docker>=7.1             # the Docker Engine SDK: Stage 1 reads containers through it
+prometheus-client>=0.20  # Stage 2: the exporter's Gauge and HTTP server
+httpx>=0.27             # Stage 2: the HTTP client the Prometheus adapter queries with
+python-dotenv>=1.0      # Stage 3: loads .env so keys never live in source
+scikit-learn>=1.5       # Stage 4: TF-IDF retrieval over the runbooks (no embeddings)
+langgraph-checkpoint-sqlite>=2.0  # Stage 5: a paused run survives the process
